@@ -11,18 +11,29 @@ The example vault server address used in this tutorial **https://external-vault.
 This tutorial was tested with Vault Enterprise 15.5 and Kubernetes 1.29 on EKS
 One other note the Vault namespace used is operator. If you not using names spaces you will set the namesspace to root in the configuration
 
-1. Enable the KV secret engine
+1. Enable the KV secret engines
 
 ```shell
-vault secrets enable -version=2 -path=secret kv
+vault secrets enable -version=2 -path=app1 kv
 ```
-2. Create a secret at path secret/exampleapp/config with a username and password.
 
 ```shell
-vault kv put secret/exampleapp/config username='static-user' password='static-pass'
+vault secrets enable -version=2 -path=app2 kv
 ```
 
-3. Create a Kubernetes service account named vault-auth with a service account token. This token is used by Vault to authenticate with the Kubernetes API.
+2. Create a secret at the path app1/secret1/webuser with a username and password.
+
+```shell
+vault kv put app1/secret1/webuser username='web-user' password='web-pass'
+```
+
+3. Create a secret at the path app2/secret1/dbuser with a username and password. 
+
+```shell
+vault kv put app2/secret1/dbuser username='db-user' password='db-pass'
+```
+
+4. Create a Kubernetes service account named vault-auth with a service account token. This token is used by Vault to authenticate with the Kubernetes API.
 
 ```shell
 kubectl create -f - <<EOF
@@ -43,7 +54,7 @@ type: kubernetes.io/service-account-token
 EOF
 ```
 
-4. Create a role for the vault-auth service account to permit access to the Kubernetes API.
+5. Create a role for the vault-auth service account to permit access to the Kubernetes API.
 
 ```shell
 kubectl create -f - <<EOF
@@ -62,37 +73,37 @@ subjects:
 EOF
 ```
 
-5. Retrieve the vault-auth secret and store it as an environment variable.
+6. Retrieve the vault-auth secret and store it as an environment variable.
 
 ```
 VAULTAUTH_SECRET=$(kubectl get secret vault-auth -o json | jq -r '.data') \
     && echo $VAULTAUTH_SECRET
 ```
-6. Decode the ca.crt certificate and store it as an environment variable.
+7. Decode the ca.crt certificate and store it as an environment variable.
 
 ```
 K8S_CA_CRT=$(echo $VAULTAUTH_SECRET | jq -r '."ca.crt"' | base64 -d)
 ```
 
-7. Decode the token and store it as an environment variable.
+8. Decode the token and store it as an environment variable.
 
 ```
 VAULTAUTH_TOKEN=$(echo $VAULTAUTH_SECRET | jq -r '.token' | base64 -d)
 ```
 
-8. Set the EKS cluster URL
+9. Set the EKS cluster URL
 ```shell
 export K8S_URL=$(kubectl config view --raw --minify --flatten \
    -o jsonpath='{.clusters[].cluster.server}')
 ```
 
-9. Enable the Kubernetes auth method.
+10. Enable the Kubernetes auth method.
 
 ```shell
 vault auth enable kubernetes
 ```
 
-10. Configure the Kubernetes auth method to connect to the Kubernetes API using the vault-auth service account token.
+11. Configure the Kubernetes auth method to connect to the Kubernetes API using the vault-auth service account token.
 
 ```
 vault write auth/kubernetes/config \
@@ -102,30 +113,34 @@ vault write auth/kubernetes/config \
 ```
 
 ```shell
-vault policy write exampleapp-read - << EOF
-path "secret/data/exampleapp/config" {
+vault policy write apps-read - << EOF
+path "app1/data/secret1/webuser" {
+  capabilities = ["read"]
+}
+
+path "app2/data/secret1/dbuser" {
   capabilities = ["read"]
 }
 EOF
 ```
 
-11. Create a role for the Kubernetes auth method and include the exampleapp-read Vault policy.
+12. Create a role for the Kubernetes auth method and include the apps Vault policy.
 
 ```shell
-vault write auth/kubernetes/role/exampleapp \
+vault write auth/kubernetes/role/apps \
 bound_service_account_names=vault-auth \
 bound_service_account_namespaces=default \
-policies=default,exampleapp-read \
+policies=default,apps-read \
 ttl=1h
 ```
-12. Install and update the HashiCorp Helm repository
+13. Install and update the HashiCorp Helm repository
 
 ```
 helm repo add hashicorp https://helm.releases.hashicorp.com \
     && helm repo update
 ```
 
-13. Install the Vault Secrets Operator.
+14. Install the Vault Secrets Operator.
 
 ```
 helm install vault-secrets-operator hashicorp/vault-secrets-operator \
@@ -133,9 +148,9 @@ helm install vault-secrets-operator hashicorp/vault-secrets-operator \
     --create-namespace \
 ```
 
-14. Create a connection to Vault Dedicated.
+15. Create a connection to Vault Dedicated.
 
-```
+```shell
 kubectl create -f - <<EOF
 ---
 apiVersion: secrets.hashicorp.com/v1beta1
@@ -145,20 +160,20 @@ metadata:
   name: vault-connection
 spec:
   # address to the Vault server.
-  address: https://external-vault.example.net:8200
+  address: $VAULT_ADDR
 ---
 EOF
 ```
 
 **Make sure to set address to your vault server address that the EKS cluster can speak to.**
 
-15. Verify the configuration.
+16. Verify the configuration.
 
 ```shell
 kubectl describe vaultconnection.secrets.hashicorp.com/vault-connection
 ```
 
-16. Configure authentication for the Vault Secrets Operator controller.
+17. Configure authentication for the Vault Secrets Operator controller.
 
 ```shell
 kubectl create -f - <<EOF
@@ -172,14 +187,14 @@ spec:
   method: kubernetes
   mount: kubernetes
   kubernetes:
-    role: exampleapp
+    role: apps
     serviceAccount: vault-auth
-  namespace: "operator" #Vault Dedicated (enterprise)
+  namespace: "admin" #Vault Dedicated only
 ---
 EOF
 ```
 
-17. Configure the Vault Secrets Operator to read from the secret KV v2 mount at the exampleapp/config path.
+18. Configure the Vault Secrets Operator to read from the secret KV v2 mount at the exampleapp/config path.
 
 ```shell
 kubectl create -f - <<EOF
@@ -187,42 +202,49 @@ kubectl create -f - <<EOF
 apiVersion: secrets.hashicorp.com/v1beta1
 kind: VaultStaticSecret
 metadata:
-  name: vault-static-secret
+  name: vault-app1-webuser
 spec:
   vaultAuthRef: vault-auth
-  namespace: "operator" #Vault Dedicated (Enterprise)
-  mount: secret
+  namespace: "admin" #Vault Dedicated only
+  mount: app1
   type: kv-v2
-  path:  exampleapp/config
+  path:  secret1/webuser
 # version: 2
   refreshAfter: 300s
   destination:
     create: true
-    name: vso-handled
+    name: vso-handled-app1
 ---
+apiVersion: secrets.hashicorp.com/v1beta1
+kind: VaultStaticSecret
+metadata:
+  name: vault-app2-dbuser
+spec:
+  vaultAuthRef: vault-auth
+  namespace: "admin" #Vault Dedicated only
+  mount: app2
+  type: kv-v2
+  path:  secret1/dbuser
+# version: 2
+  refreshAfter: 300s
+  destination:
+    create: true
+    name: vso-handled-app2
 EOF
 ```
 
-18. Verify the Kubernetes secret was created.
+19. Verify the Kubernetes secret was created.
 
 ```shell
 kubectl get secrets
 ```
 
-19. Read the Kubernetes secret value and decode the base64 encoded strings.
+20. Read the Kubernetes secret value and decode the base64 encoded strings.
 
 ```
-kubectl get secret vso-handled -o json | jq ".data | map_values(@base64d)"
+kubectl get secret vso-handled-app1 -o json | jq ".data | map_values(@base64d)"
 ```
 
-20. Change the secret value
-
-```shell
-vault kv put secret/exampleapp/config username='static-user-changed' password='static-pass-changed'
 ```
-
-21. Wait a few seconds and check again to see the new values
-
-```
-kubectl get secret vso-handled -o json | jq ".data | map_values(@base64d)"
+kubectl get secret vso-handled-app1 -o json | jq ".data | map_values(@base64d)"
 ```
